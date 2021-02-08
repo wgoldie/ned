@@ -40,6 +40,7 @@ fn run_input() -> Vec<String> {
     input
 }
 
+#[derive(Debug)]
 enum Address {
     Current,
     Last,
@@ -48,6 +49,7 @@ enum Address {
     NthNext(usize),
 }
 
+#[derive(Debug)]
 enum AddressOrRange<T> {
     Address(T),
     AddressRange(T, T),
@@ -56,8 +58,8 @@ enum AddressOrRange<T> {
 impl AddressOrRange<usize> {
     fn to_range(self) -> Range<usize> {
         match self {
-            AddressOrRange::Address(a) => (a..(a+1)),
-            AddressOrRange::AddressRange(a, b) => a..b,
+            AddressOrRange::Address(a) => ((a-1)..(a)),
+            AddressOrRange::AddressRange(a, b) => (a-1)..(b),
         }
     }
 }
@@ -95,6 +97,7 @@ fn parse_address(command_str: &str) -> (Option<Address>, &str) {
 
 fn parse_address_range_shorthand(command_str: &str) -> (Option<AddressOrRange<Address>>, &str) {
     match command_str.chars().nth(0) {
+        Some(',') => { println!("here"); (Some(AddressOrRange::AddressRange(Address::Nth(1), Address::Last)), &command_str[1..]) },
         Some(';') => (Some(AddressOrRange::AddressRange(Address::Current, Address::Last)), &command_str[1..]),
         _ => (None, command_str)
     }
@@ -126,7 +129,7 @@ fn parse_command_str(command_str: &str) -> Option<NedCommand> {
     let (aorr_1, remainder) = parse_leading_address(command_str);
     let (aorr, remainder) = match (aorr_1, remainder.chars().nth(0)) {
         (Some(AddressOrRange::Address(addr)), Some(',')) => {
-            let (aorr_2, remainder_2) = parse_address(command_str);
+            let (aorr_2, remainder_2) = parse_address(&remainder[1..]);
 
             (Some(AddressOrRange::AddressRange(addr, aorr_2.unwrap())), remainder_2)
         },
@@ -148,7 +151,7 @@ fn run_command(state: &mut NedState, command_str: &str) -> Option<CommandResult>
             let input = run_input();
             for (i, line) in input.iter().enumerate() { 
                 // TODO this clone should be replaced with lifetime
-                state.line_buffer.insert(state.reify_address(&addr)? + i, line.to_owned());
+                state.line_buffer.insert(state.reify_address(&addr)? - 1 + i, line.to_owned());
             }
             Some(CommandResult::Noop)
         },
@@ -156,7 +159,7 @@ fn run_command(state: &mut NedState, command_str: &str) -> Option<CommandResult>
             let input = run_input();
             for (i, line) in input.iter().enumerate() { 
                 // TODO this clone should be replaced with lifetime
-                state.line_buffer.insert(state.reify_address(&addr)? - 1 + i, line.to_owned());
+                state.line_buffer.insert(state.reify_address(&addr)? - 2 + i, line.to_owned());
             }
             Some(CommandResult::Noop)
         },
@@ -170,7 +173,7 @@ fn run_command(state: &mut NedState, command_str: &str) -> Option<CommandResult>
         Some(NedCommand::PrintLn(addr_or_range)) => {
             let range = state.reify_address_or_range(&addr_or_range)?.to_range();
             for i in range {
-                println!("{} {}", i, state.line_buffer.get(i).unwrap());
+                println!("{}\t{}", i + 1, state.line_buffer.get(i).unwrap());
             }
             Some(CommandResult::Noop)
         },
@@ -221,11 +224,11 @@ impl NedState {
 }
 
 fn run_editor(buffer: &str) {
-    let line_buffer: Vec<String> = buffer.split("\n").map(|s| s.to_string()).collect();
-    let current_address = line_buffer.len() - 1;
+    let mut line_buffer: Vec<String> = buffer.split("\n").map(|s| s.to_string()).collect();
+    line_buffer.pop();
+    let current_address = line_buffer.len();
     let mut state = NedState { line_buffer, current_address };
     loop {
-        print_flush("> ");
         let mut command = String::new();
         io::stdin().read_line(&mut command).expect("IO");
         let result = run_command(&mut state, &command);
@@ -234,7 +237,6 @@ fn run_editor(buffer: &str) {
             Some(CommandResult::Noop) => (),
             None => println!("?"),
         }
-        println!("{:?}", state.line_buffer);
     }   
 }
 
