@@ -3,10 +3,12 @@ use std::io::Read;
 use std::ops::Range;
 use std::io::Write;
 use std::io;
+use std::fs::File;
 use std::cmp::Ordering;
+use std::cmp::min;
 use std::fs::OpenOptions;
 
-fn load_file() -> String {
+fn load_file() -> (File, String) {
     let filename = env::args()
         .nth(1)
         .expect("ned must be passed a filename");
@@ -20,7 +22,7 @@ fn load_file() -> String {
     let mut buffer = String::new();
     file.read_to_string(&mut buffer)
         .expect("error reading file");
-    buffer
+    (file, buffer)
 }
 
 fn print_flush(string: &str) {
@@ -71,6 +73,7 @@ enum NedCommand {
     Print(AddressOrRange<Address>),
     Change(AddressOrRange<Address>),
     Delete(AddressOrRange<Address>),
+    Save(AddressOrRange<Address>),
     Quit
 }
 
@@ -97,7 +100,7 @@ fn parse_address(command_str: &str) -> (Option<Address>, &str) {
 
 fn parse_address_range_shorthand(command_str: &str) -> (Option<AddressOrRange<Address>>, &str) {
     match command_str.chars().nth(0) {
-        Some(',') => { println!("here"); (Some(AddressOrRange::AddressRange(Address::Nth(1), Address::Last)), &command_str[1..]) },
+        Some(',') => (Some(AddressOrRange::AddressRange(Address::Nth(1), Address::Last)), &command_str[1..]),
         Some(';') => (Some(AddressOrRange::AddressRange(Address::Current, Address::Last)), &command_str[1..]),
         _ => (None, command_str)
     }
@@ -111,16 +114,26 @@ fn parse_leading_address(command_str: &str) -> (Option<AddressOrRange<Address>>,
     }
 }
 
+const CURRENT_RANGE: AddressOrRange::<Address> = AddressOrRange::AddressRange(Address::Current, Address::Current);
+
 fn parse_command(command_str: &str, addr: Option<AddressOrRange<Address>>) -> Option<(NedCommand, &str)> {
-    let addr_specified = addr.is_none();
-    match (command_str.chars().nth(0), addr.unwrap_or(AddressOrRange::Address(Address::Current)), addr_specified) {
-        (Some('a'), AddressOrRange::Address(x), _) => Some((NedCommand::Append(x), &command_str[1..])),
-        (Some('i'), AddressOrRange::Address(x), _) => Some((NedCommand::Insert(x), &command_str[1..])),
-        (Some('n'), x, _) => Some((NedCommand::PrintLn(x), &command_str[1..])),
-        (Some('p'), x, _) => Some((NedCommand::Print(x), &command_str[1..])),
-        (Some('c'), x, _) => Some((NedCommand::Change(x), &command_str[1..])),
-        (Some('d'), x, _) => Some((NedCommand::Delete(x), &command_str[1..])),
-        (Some('q'), _, true) => Some((NedCommand::Quit, &command_str[1..])),
+    let remainder = &command_str[1..];
+    match (command_str.chars().nth(0), addr) {
+        (Some('a'), Some(AddressOrRange::Address(addr))) => Some((NedCommand::Append(addr), remainder)),
+        (Some('a'), None) => Some((NedCommand::Append(Address::Current), remainder)),
+        (Some('i'), Some(AddressOrRange::Address(addr))) => Some((NedCommand::Insert(addr), remainder)),
+        (Some('i'), None) => Some((NedCommand::Insert(Address::Current), remainder)),
+        (Some('n'), Some(aorr)) => Some((NedCommand::PrintLn(aorr), remainder)),
+        (Some('n'), None) => Some((NedCommand::PrintLn(CURRENT_RANGE), remainder)),
+        (Some('p'), Some(aorr)) => Some((NedCommand::Print(aorr), remainder)),
+        (Some('p'), None) => Some((NedCommand::Print(CURRENT_RANGE), remainder)),
+        (Some('c'), Some(aorr)) => Some((NedCommand::Change(aorr), remainder)),
+        (Some('c'), None) => Some((NedCommand::Change(CURRENT_RANGE), remainder)),
+        (Some('d'), Some(aorr)) => Some((NedCommand::Delete(aorr), remainder)),
+        (Some('d'), None) => Some((NedCommand::Delete(CURRENT_RANGE), remainder)),
+        (Some('w'), Some(aorr)) => Some((NedCommand::Save(aorr), remainder)),
+        (Some('w'), None) => Some((NedCommand::Save(AddressOrRange::AddressRange(Address::Nth(1), Address::Last)), remainder)),
+        (Some('q'), None) => Some((NedCommand::Quit, remainder)),
         _ => None 
     }
 }
@@ -149,22 +162,27 @@ fn run_command(state: &mut NedState, command_str: &str) -> Option<CommandResult>
     match parse_command_str(command_str) {
         Some(NedCommand::Append(addr)) => {
             let input = run_input();
+            let start_idx = state.reify_address(&addr)?;
             for (i, line) in input.iter().enumerate() { 
                 // TODO this clone should be replaced with lifetime
-                state.line_buffer.insert(state.reify_address(&addr)? - 1 + i, line.to_owned());
+                state.line_buffer.insert(start_idx + i, line.to_owned());
             }
+            state.current_address = start_idx + input.len();
             Some(CommandResult::Noop)
         },
         Some(NedCommand::Insert(addr)) => {
             let input = run_input();
+            let start_idx = state.reify_address(&addr)? - 1;
             for (i, line) in input.iter().enumerate() { 
                 // TODO this clone should be replaced with lifetime
-                state.line_buffer.insert(state.reify_address(&addr)? - 2 + i, line.to_owned());
+                state.line_buffer.insert(start_idx + i, line.to_owned());
             }
+            state.current_address = start_idx + input.len();
             Some(CommandResult::Noop)
         },
         Some(NedCommand::Print(addr_or_range)) => {
             let range = state.reify_address_or_range(&addr_or_range)?.to_range();
+            state.current_address = range.end;
             for line in state.line_buffer.get(range).unwrap() {
                 println!("{}", line);
             }
@@ -172,6 +190,7 @@ fn run_command(state: &mut NedState, command_str: &str) -> Option<CommandResult>
         },
         Some(NedCommand::PrintLn(addr_or_range)) => {
             let range = state.reify_address_or_range(&addr_or_range)?.to_range();
+            state.current_address = range.end;
             for i in range {
                 println!("{}\t{}", i + 1, state.line_buffer.get(i).unwrap());
             }
@@ -180,20 +199,32 @@ fn run_command(state: &mut NedState, command_str: &str) -> Option<CommandResult>
         Some(NedCommand::Change(addr_or_range)) => {
             let range = state.reify_address_or_range(&addr_or_range)?.to_range();
             let input = run_input();
-            state.line_buffer = state.line_buffer.splice(range, input).collect();
+            state.current_address = range.end;
+            state.line_buffer.splice(range, input);
             Some(CommandResult::Noop)
         }
         Some(NedCommand::Delete(addr_or_range)) => {
             let range = state.reify_address_or_range(&addr_or_range)?.to_range();
-            state.line_buffer = state.line_buffer.splice(range, vec![]).collect();
+            let end = range.start + 1;
+            state.line_buffer.splice(range, vec![]);
+            state.current_address = min(end, state.line_buffer.len());
             Some(CommandResult::Noop)
         },
+        Some(NedCommand::Save(addr_or_range)) => {
+            let range = state.reify_address_or_range(&addr_or_range)?.to_range();
+            let lines = state.line_buffer.get(range).unwrap().join("\n");
+            state.file.set_len(0).unwrap();
+            write!(&mut state.file, "{}", lines).unwrap();
+            state.file.flush().unwrap();
+            Some(CommandResult::Noop)
+        }
         Some(NedCommand::Quit) => Some(CommandResult::Quit),
         None => None,
     }
 }
 
 struct NedState {
+    file: File,
     line_buffer: Vec<String>,
     current_address: usize
 }
@@ -223,11 +254,10 @@ impl NedState {
     }
 }
 
-fn run_editor(buffer: &str) {
-    let mut line_buffer: Vec<String> = buffer.split("\n").map(|s| s.to_string()).collect();
-    line_buffer.pop();
+fn run_editor(file: File, buffer: &str) {
+    let line_buffer: Vec<String> = buffer.split("\n").map(|s| s.to_string()).collect();
     let current_address = line_buffer.len();
-    let mut state = NedState { line_buffer, current_address };
+    let mut state = NedState { file, line_buffer, current_address };
     loop {
         let mut command = String::new();
         io::stdin().read_line(&mut command).expect("IO");
@@ -241,6 +271,6 @@ fn run_editor(buffer: &str) {
 }
 
 fn main() {
-    let buffer = load_file();
-    run_editor(&buffer);
+    let (file, buffer) = load_file();
+    run_editor(file, &buffer);
 }
