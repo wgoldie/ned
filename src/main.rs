@@ -2,6 +2,7 @@ use std::env;
 use std::io::Read;
 use std::io::Write;
 use std::io;
+use std::cmp::Ordering;
 use std::fs::OpenOptions;
 
 fn load_file() -> String {
@@ -46,22 +47,22 @@ enum Address {
     NthNext(usize),
 }
 
-enum AddressOrRange {
-    Address(Address),
-    AddressRange(Address, Address),
+enum AddressOrRange<T> {
+    Address(T),
+    AddressRange(T, T),
 }
 
 enum NedCommand {
     Append(Address),
     Insert(Address),
-    PrintLn(AddressOrRange),
-    Print(AddressOrRange),
-    Change(AddressOrRange),
-    Delete(AddressOrRange),
+    PrintLn(AddressOrRange<Address>),
+    Print(AddressOrRange<Address>),
+    Change(AddressOrRange<Address>),
+    Delete(AddressOrRange<Address>),
     Quit
 }
 
-fn parse_leading_address(command_str: &str) -> (Option<AddressOrRange>, &str) {
+fn parse_leading_address(command_str: &str) -> (Option<AddressOrRange<Address>>, &str) {
     match command_str.chars().nth(0) {
         Some('.') => (Some(AddressOrRange::Address(Address::Current)), &command_str[1..]),
         Some('$') => (Some(AddressOrRange::Address(Address::Last)), &command_str[1..]),
@@ -72,7 +73,7 @@ fn parse_leading_address(command_str: &str) -> (Option<AddressOrRange>, &str) {
     }
 }
 
-fn parse_command(command_str: &str, addr: Option<AddressOrRange>) -> Option<(NedCommand, &str)> {
+fn parse_command(command_str: &str, addr: Option<AddressOrRange<Address>>) -> Option<(NedCommand, &str)> {
     let addr_specified = addr.is_none();
     match (command_str.chars().nth(0), addr.unwrap_or(AddressOrRange::Address(Address::Current)), addr_specified) {
         (Some('a'), AddressOrRange::Address(x), _) => Some((NedCommand::Append(x), &command_str[1..])),
@@ -92,22 +93,49 @@ fn parse_command_str(command_str: &str) -> Option<NedCommand> {
     Some(command)
 }
 
-fn run_command(state: &mut NedState, command_str: &str) {
+fn run_command(state: &mut NedState, command_str: &str) -> Option<()> {
     match parse_command_str(command_str) {
         Some(NedCommand::Append(addr)) => {
             let input = run_input();
             for (i, line) in input.iter().enumerate() { 
                 // TODO this clone should be replaced with lifetime
-                state.line_buffer.insert(state.current_address + i, line.to_owned());
+                state.line_buffer.insert(state.reify_address(&addr)? + i, line.to_owned());
             }
+            Some(())
         },
-        None => { println!("?") },
+        Some(_) => { println!("not implemented"); Some(()) },
+        None => None,
     }
 }
 
 struct NedState {
     line_buffer: Vec<String>,
     current_address: usize
+}
+
+impl NedState {
+    fn reify_address(&self, address: &Address) -> Option<usize> {
+        let reified = match address {
+            Address::Current => self.current_address,
+            Address::Last => self.line_buffer.len(),
+            Address::Nth(n) => n + 0, // TODO why do I have to do this?
+            Address::NthPrevious(n) => self.current_address - n,
+            Address::NthNext(n) => self.current_address + n,
+        };
+
+        match (reified.cmp(&1), reified.cmp(&self.line_buffer.len())) {
+            (Ordering::Less, _) => None,
+            (_, Ordering::Greater) => None,
+            _ => Some(reified),
+        }
+    }
+
+    fn reify_address_or_range(&self, address_or_range: &AddressOrRange<Address>) -> Option<AddressOrRange<usize>> {
+        match address_or_range {
+            AddressOrRange::Address(a) => Some(AddressOrRange::Address(self.reify_address(a)?)),
+            AddressOrRange::AddressRange(a_1, a_2) => Some(AddressOrRange::AddressRange(self.reify_address(a_1)?, self.reify_address(a_2)?)),
+        }
+    }
 }
 
 fn run_editor(buffer: &str) {
